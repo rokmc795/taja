@@ -215,6 +215,15 @@ body {
   background: linear-gradient(135deg, var(--brandA), var(--brandB));
 }
 .user-hero .ue { font-size: 34px; width: 58px; height: 58px; border-radius: 50%; background: rgba(255,255,255,.2); display: flex; align-items: center; justify-content: center; }
+button.snd-btn {
+  width: 42px; height: 42px; padding: 0; border: none; border-radius: 50%;
+  background: var(--card); color: var(--text); cursor: pointer; flex: none;
+  font: inherit; font-size: 20px; line-height: 1; margin-left: auto;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 2px 8px rgba(10,10,40,.1);
+}
+button.snd-btn.off { opacity: .55; }
+.hero button.snd-btn { background: rgba(255,255,255,.22); box-shadow: none; }
 </style>
 
 <div id="app">
@@ -342,16 +351,46 @@ const MODES = {
 const Sound = {
   on: localStorage.getItem("cw_sound") !== "0",
   ctx: null,
-  toggle() { this.on = !this.on; localStorage.setItem("cw_sound", this.on ? "1" : "0"); },
+  master: null,
+  htmlAudio: null,
+  toggle() {
+    this.on = !this.on;
+    localStorage.setItem("cw_sound", this.on ? "1" : "0");
+    if (this.on) this.unlock();
+    else this.htmlAudio?.pause();
+  },
   ensure() {
     if (!this.on) return null;
     if (!this.ctx) {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return null;
       this.ctx = new AC();
+      this.master = this.ctx.createGain();
+      this.master.connect(this.ctx.destination);
     }
-    if (this.ctx.state === "suspended") this.ctx.resume();
+    if (this.ctx.state !== "running") this.ctx.resume();
     return this.ctx;
+  },
+  // iOS는 무음(진동) 스위치가 켜져 있으면 Web Audio를 음소거하므로,
+  // 무음 <audio> 루프를 재생해 오디오 세션을 '미디어 재생' 모드로 전환한다
+  silentLoop() {
+    const rate = 8000, n = rate;
+    const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    const put = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    put(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); put(8, "WAVE"); put(12, "fmt ");
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true);
+    v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    put(36, "data"); v.setUint32(40, n * 2, true);
+    const a = new Audio(URL.createObjectURL(new Blob([buf], { type: "audio/wav" })));
+    a.loop = true; a.preload = "auto"; a.setAttribute("playsinline", "");
+    return a;
+  },
+  unlock() {
+    if (!this.on) return;
+    this.ensure();
+    if (!this.htmlAudio) this.htmlAudio = this.silentLoop();
+    if (this.htmlAudio.paused) this.htmlAudio.play().catch(() => {});
   },
   tone(freq, dur = 0.12, type = "sine", vol = 0.12, delay = 0, slide = 0) {
     const ctx = this.ensure();
@@ -364,14 +403,36 @@ const Sound = {
     g.gain.setValueAtTime(0, t0);
     g.gain.linearRampToValueAtTime(vol, t0 + 0.008);
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-    osc.connect(g); g.connect(ctx.destination);
+    osc.connect(g); g.connect(this.master);
     osc.start(t0); osc.stop(t0 + dur + 0.05);
   },
-  key() { this.tone(1400, 0.035, "triangle", 0.05); },                     // 타건
+  noise(dur = 0.3, vol = 0.1, delay = 0, cutoff = 900) {
+    const ctx = this.ensure();
+    if (!ctx) return;
+    const t0 = ctx.currentTime + delay;
+    if (!this._nbuf || this._nbuf.sampleRate !== ctx.sampleRate) {
+      const n = Math.floor(ctx.sampleRate * 0.5);
+      this._nbuf = ctx.createBuffer(1, n, ctx.sampleRate);
+      const d = this._nbuf.getChannelData(0);
+      for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+    }
+    const src = ctx.createBufferSource(); src.buffer = this._nbuf;
+    const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = cutoff;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(f); f.connect(g); g.connect(this.master);
+    src.start(t0); src.stop(t0 + dur + 0.05);
+  },
+  key() { this.tone(1500, 0.035, "triangle", 0.06); },                     // 타건 틱
+  tick() { this.tone(1180, 0.06, "sine", 0.07); },                        // 맞는 키 (자리 연습)
+  ui() { this.tone(880, 0.05, "triangle", 0.07); },                       // 버튼·메뉴 탭
   correct() { this.tone(660, 0.09, "sine", 0.12); this.tone(990, 0.14, "sine", 0.12, 0.07); },  // 정답
-  wrong() { this.tone(150, 0.18, "sawtooth", 0.09); },                     // 오답
-  pop() { this.tone(500, 0.1, "triangle", 0.14, 0, 1000); },               // 베네치아 처리
-  splash() { this.tone(420, 0.32, "sine", 0.13, 0, 85); },                 // 물에 빠짐
+  wrong() { this.tone(160, 0.16, "sawtooth", 0.1); this.tone(110, 0.14, "sawtooth", 0.07, 0.05); },  // 오답
+  pop() { this.tone(420, 0.09, "triangle", 0.15, 0, 1500); this.tone(1680, 0.09, "sine", 0.08, 0.05); },  // 베네치아 낱말 제거
+  splash() { this.noise(0.4, 0.17, 0, 850); this.tone(340, 0.38, "sine", 0.12, 0, 70); },  // 물에 빠짐
+  danger() { this.tone(233, 0.07, "square", 0.05); this.tone(233, 0.07, "square", 0.05, 0.11); },  // 수면 근접 경고
+  start() { [392, 523, 659].forEach((f, i) => this.tone(f, 0.11, "triangle", 0.11, i * 0.09)); },  // 게임 시작
   levelUp() { [523, 659, 784, 1047].forEach((f, i) => this.tone(f, 0.12, "triangle", 0.11, i * 0.09)); },
   fanfare() {
     [523, 659, 784, 1047, 1319].forEach((f, i) => this.tone(f, 0.16, "triangle", 0.12, i * 0.11));
@@ -380,8 +441,30 @@ const Sound = {
   done() { this.tone(784, 0.12, "sine", 0.12); this.tone(1047, 0.24, "sine", 0.12, 0.1); },
   over() { [400, 320, 250, 175].forEach((f, i) => this.tone(f, 0.17, "sawtooth", 0.08, i * 0.13)); }
 };
-// iOS Safari는 사용자 제스처 안에서 오디오를 시작해야 하므로 첫 터치에서 준비
-document.addEventListener("pointerdown", () => Sound.ensure(), { passive: true });
+// iOS Safari는 사용자 제스처 안에서만 오디오를 시작할 수 있으므로 모든 제스처에서 잠금 해제
+["pointerdown", "keydown"].forEach(ev => document.addEventListener(ev, () => Sound.unlock(), { passive: true }));
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) Sound.htmlAudio?.pause();
+  else Sound.unlock();
+});
+
+/* 소리 토글 버튼 (모든 화면 우측 상단) + 공통 버튼 효과음 */
+const sndBtnHTML = () => `<button class="snd-btn${Sound.on ? "" : " off"}" data-snd aria-label="${Sound.on ? "소리 끄기" : "소리 켜기"}">${Sound.on ? "🔊" : "🔇"}</button>`;
+document.addEventListener("click", e => {
+  const snd = e.target.closest("[data-snd]");
+  if (snd) {
+    Sound.toggle();
+    document.querySelectorAll("[data-snd]").forEach(b => {
+      b.textContent = Sound.on ? "🔊" : "🔇";
+      b.classList.toggle("off", !Sound.on);
+      b.setAttribute("aria-label", Sound.on ? "소리 끄기" : "소리 켜기");
+    });
+    if (Sound.on) Sound.correct();
+    return;
+  }
+  const b = e.target.closest("button");
+  if (b && !b.closest("#kbd") && !b.hasAttribute("data-nosnd")) Sound.ui();
+});
 
 /* ── 기록 (localStorage, 사용자별) ───────────────────────── */
 const Records = {
@@ -615,11 +698,13 @@ function renderMenu() {
     <div class="hero">
       <div style="display:flex;justify-content:space-between;align-items:flex-start">
         <div><h1>채원타자</h1><div class="tag">Safari에서 즐기는 한글 타자 연습 · 외장 키보드 완전 지원</div></div>
-        <div style="font-size:44px">⌨️</div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="font-size:40px">⌨️</div>
+          ${sndBtnHTML()}
+        </div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="pill" id="userChip" style="border:none;cursor:pointer;font:inherit;color:#fff">${user.emoji} ${esc(user.name)} ▾</button>
-        <button class="pill" id="sndChip" style="border:none;cursor:pointer;font:inherit;color:#fff">${Sound.on ? "🔊 소리 켬" : "🔇 소리 끔"}</button>
         ${best > 0 ? `<div class="pill">👑 최고 기록 ${best}타/분</div>` : ""}
       </div>
     </div>
@@ -635,13 +720,9 @@ function renderMenu() {
       <div class="mode-icon" style="background:${grad(["#B33BC4","#F0447A"])}">📊</div>
       <div><div class="mt">통계</div><div class="ms">기록과 추이를 확인해요</div></div>
     </button>
-    <div class="note">이 페이지를 홈 화면에 추가하면 앱처럼 쓸 수 있어요 (공유 → 홈 화면에 추가)</div>`;
+    <div class="note">이 페이지를 홈 화면에 추가하면 앱처럼 쓸 수 있어요 (공유 → 홈 화면에 추가)<br>
+      우측 상단 🔊 버튼으로 효과음을 켜고 끌 수 있어요 · 아이폰 무음 스위치가 켜져 있어도 효과음이 재생돼요</div>`;
   document.getElementById("userChip").addEventListener("click", showUserPicker);
-  document.getElementById("sndChip").addEventListener("click", () => {
-    Sound.toggle();
-    if (Sound.on) Sound.correct();
-    go(renderMenu);
-  });
   app.querySelectorAll("[data-mode]").forEach(b => b.addEventListener("click", () => {
     const k = b.dataset.mode;
     if (k === "key") go(renderKey);
@@ -654,7 +735,7 @@ function renderMenu() {
 }
 const shuffle = a => [...a].sort(() => Math.random() - 0.5);
 function backbar(title) {
-  return `<div class="backbar"><button id="btnBack">‹ 메뉴</button><h2>${title}</h2></div>`;
+  return `<div class="backbar"><button id="btnBack">‹ 메뉴</button><h2>${title}</h2>${sndBtnHTML()}</div>`;
 }
 function bindBack() { document.getElementById("btnBack").addEventListener("click", () => go(renderMenu)); }
 
@@ -682,9 +763,11 @@ function renderKey(levelName = "가운뎃줄") {
     const typed = decompose(input);
     let i = 0;
     while (i < typed.length && i < seq.length && typed[i] === seq[i]) i++;
+    const prevMatched = matched;
     matched = i;
     const wrongNow = Math.max(typed.length - i, 0);
     if (wrongNow > pendingWrong) { errors += wrongNow - pendingWrong; Sound.wrong(); }
+    else if (matched > prevMatched && wrongNow === 0) Sound.tick();
     pendingWrong = wrongNow;
     cells.forEach((c, idx) => { c.className = idx < matched ? "done" : idx === matched ? "cur" : ""; });
     document.getElementById("wrongBanner").style.display = pendingWrong > 0 ? "" : "none";
@@ -880,7 +963,7 @@ function renderVenice() {
         <div style="font-size:44px">🌊</div>
         <div style="font-weight:800;font-size:19px">낱말이 물에 닿기 전에 입력하세요!</div>
         <div style="color:var(--sub);font-size:14px">놓칠 때마다 물이 차오르고, 5번 놓치면 끝납니다</div>
-        <button class="btn" id="vgo">게임 시작</button>
+        <button class="btn" id="vgo" data-nosnd>게임 시작</button>
       </div>
     </div>
     ${inputLineHTML("낱말을 입력하고 return")}
@@ -915,8 +998,11 @@ function renderVenice() {
     if (!running) return;
     const dt = Math.min((ts - lastT) / 1000 || 0, 0.1);
     lastT = ts;
-    for (const o of words) o.y += o.speed * dt;
     const surface = 1 - waterRatio();
+    for (const o of words) {
+      o.y += o.speed * dt;
+      if (!o.warned && o.y >= surface - 0.16) { o.warned = true; Sound.danger(); }
+    }
     const fallen = words.filter(o => o.y >= surface);
     if (fallen.length) {
       fallen.forEach(o => o.el.remove());
@@ -940,6 +1026,7 @@ function renderVenice() {
   };
   document.getElementById("vgo").addEventListener("click", () => {
     document.getElementById("vstart").remove();
+    Sound.start();
     running = true; lastT = 0;
     raf = requestAnimationFrame(ts => { lastT = ts; raf = requestAnimationFrame(tick); });
   });
