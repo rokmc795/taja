@@ -132,6 +132,8 @@ body {
 }
 .jamo-grid span.done { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
 .jamo-grid span.cur { background: linear-gradient(135deg, #FF9500, #FF375F); color: #fff; transform: scale(1.1); }
+.jamo-grid span.cur.miss { background: var(--bad); animation: shake .28s; }
+@keyframes shake { 25% { transform: translateX(-4px) scale(1.1); } 75% { transform: translateX(4px) scale(1.1); } }
 .banner { background: var(--bad); color: #fff; border-radius: 99px; padding: 9px 16px; font-size: 14px; font-weight: 600; text-align: center; }
 .rowbtns { display: flex; gap: 10px; justify-content: center; }
 .btn {
@@ -745,7 +747,7 @@ function renderKey(levelName = "가운뎃줄") {
     const pool = JAMO_LEVELS[levelName];
     return pool[Math.floor(Math.random() * pool.length)];
   });
-  let input = "", matched = 0, errors = 0, pendingWrong = 0, start = null, done = false;
+  let matched = 0, errors = 0, start = null, done = false;
   app.innerHTML = `
     ${backbar("자리 연습")}
     <div class="seg">${Object.keys(JAMO_LEVELS).map(n =>
@@ -753,41 +755,38 @@ function renderKey(levelName = "가운뎃줄") {
     ${chipsHTML([["현재 타수", 0, "cCpm"], ["정확도", "100%", "cAcc"], ["진행", `0/${seq.length}`, "cPrg"], ["시간", "0:00", "cTime"]])}
     <div class="progress"><div id="pbar" style="width:0;background:${grad(MODES.key.g)}"></div></div>
     <div class="card"><div class="jamo-grid" id="grid">${seq.map(j => `<span>${j}</span>`).join("")}</div></div>
-    <div class="banner" id="wrongBanner" style="display:none">잘못 입력했어요. ⌫ 로 지운 뒤 다시 입력하세요.</div>
-    ${inputLineHTML("화면 자판을 탭하거나 외장 키보드로 입력하세요")}
     ${keyboardHTML(false)}`;
   bindBack(); bindKeyboard();
   app.querySelectorAll("[data-lv]").forEach(b => b.addEventListener("click", () => go(() => renderKey(b.dataset.lv))));
   const cells = [...document.querySelectorAll("#grid span")];
-  const update = () => {
-    const typed = decompose(input);
-    let i = 0;
-    while (i < typed.length && i < seq.length && typed[i] === seq[i]) i++;
-    const prevMatched = matched;
-    matched = i;
-    const wrongNow = Math.max(typed.length - i, 0);
-    if (wrongNow > pendingWrong) { errors += wrongNow - pendingWrong; Sound.wrong(); }
-    else if (matched > prevMatched && wrongNow === 0) Sound.tick();
-    pendingWrong = wrongNow;
+  const paint = () => {
     cells.forEach((c, idx) => { c.className = idx < matched ? "done" : idx === matched ? "cur" : ""; });
-    document.getElementById("wrongBanner").style.display = pendingWrong > 0 ? "" : "none";
     document.getElementById("pbar").style.width = (matched / seq.length * 100) + "%";
     document.getElementById("cPrg").textContent = `${matched}/${seq.length}`;
-    const acc = matched + errors ? Math.round(matched / (matched + errors) * 100) : 100;
-    document.getElementById("cAcc").textContent = acc + "%";
+    document.getElementById("cAcc").textContent = (matched + errors ? Math.round(matched / (matched + errors) * 100) : 100) + "%";
     highlightKey(matched < seq.length ? seq[matched] : null);
-    setInput(input);
-    if (matched === seq.length && !done) {
-      done = true;
-      const el = (Date.now() - start) / 1000;
-      showResult("key", `자리 연습 · ${levelName}`, el > 1 ? Math.round(matched / el * 60) : 0, acc, () => go(() => renderKey(levelName)));
-    }
   };
-  const feed = fn => { if (done) return; if (!start) start = Date.now(); fn(); update(); };
   session = {
-    jamo: j => feed(() => input = hAppend(input, j)),
-    space: () => feed(() => input += " "),
-    backspace: () => feed(() => input = hDelete(input)),
+    // 틀린 키는 오답으로만 세고, 맞는 키를 누르면 그 자리에서 바로 진행
+    jamo: j => {
+      if (done || matched >= seq.length) return;
+      if (!start) start = Date.now();
+      if (j === seq[matched]) {
+        matched++; Sound.tick(); paint();
+        if (matched === seq.length) {
+          done = true;
+          const el = (Date.now() - start) / 1000;
+          const acc = matched + errors ? Math.round(matched / (matched + errors) * 100) : 100;
+          showResult("key", `자리 연습 · ${levelName}`, el > 1 ? Math.round(matched / el * 60) : 0, acc, () => go(() => renderKey(levelName)));
+        }
+      } else {
+        errors++; Sound.wrong(); paint();
+        const cur = cells[matched];
+        if (cur) { cur.classList.add("miss"); setTimeout(() => cur.classList.remove("miss"), 300); }
+      }
+    },
+    space: () => {},
+    backspace: () => {},
     submit: () => {}
   };
   const t = setInterval(() => {
@@ -797,7 +796,7 @@ function renderKey(levelName = "가운뎃줄") {
     document.getElementById("cCpm").textContent = el > 1 ? Math.round(matched / el * 60) : 0;
   }, 250);
   cleanup = () => clearInterval(t);
-  update();
+  paint();
 }
 
 /* ── 낱말 연습 ───────────────────────────────────────────── */
